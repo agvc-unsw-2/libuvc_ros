@@ -1,6 +1,6 @@
 #pragma once
 
-#include "/usr/local/include/libuvc/libuvc.h" // TODO fix this
+#include <libuvc/libuvc.h>
 
 #include <ros/ros.h>
 #include <image_transport/image_transport.h>

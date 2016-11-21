@@ -38,8 +38,9 @@
 #include <std_msgs/Header.h>
 #include <image_transport/camera_publisher.h>
 #include <dynamic_reconfigure/server.h>
-#include "/usr/local/include/libuvc/libuvc.h" //TODO fix this
+#include <libuvc/libuvc.h>
 #include <yaml-cpp/yaml.h>
+#include <unistd.h>
 
 namespace libuvc_camera {
 
@@ -274,6 +275,7 @@ void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t lev
 			if (zedSetAutoExp(new_config.auto_exposure ? 1 : 0)) {
 				ROS_WARN("Unable to set auto_exposure to %d, error %d", new_config.auto_exposure, r);
 			}
+			usleep(1000000);
 		}
 	} else {
 		PARAM_INT(auto_focus, focus_auto, new_config.auto_focus ? 1 : 0);
