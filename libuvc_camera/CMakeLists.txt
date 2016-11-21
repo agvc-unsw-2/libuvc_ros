@@ -26,7 +26,7 @@ find_package(Boost REQUIRED COMPONENTS thread)
 include_directories(${Boost_INCLUDE_DIRS})
 
 add_executable(camera_node src/main.cpp src/camera_driver.cpp)
-target_link_libraries(camera_node ${libuvc_LIBRARIES} ${Boost_LIBRARIES} ${catkin_LIBRARIES})
+target_link_libraries(camera_node ${libuvc_LIBRARIES} ${Boost_LIBRARIES} ${catkin_LIBRARIES} yaml-cpp)
 add_dependencies(camera_node ${PROJECT_NAME}_gencfg)
 
 add_library(libuvc_camera_nodelet src/nodelet.cpp src/camera_driver.cpp)

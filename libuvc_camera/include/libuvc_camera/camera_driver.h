@@ -1,6 +1,6 @@
 #pragma once
 
-#include <libuvc/libuvc.h>
+#include "/usr/local/include/libuvc/libuvc.h" // TODO fix this
 
 #include <ros/ros.h>
 #include <image_transport/image_transport.h>
@@ -54,6 +54,13 @@ private:
   // Accept a new image frame from the camera
   void ImageCallback(uvc_frame_t *frame);
   static void ImageCallbackAdapter(uvc_frame_t *frame, void *ptr);
+  void setupCameraInfo(UVCCameraConfig &new_config);
+
+
+  int zedSetGeneric(uint8_t item, uint8_t camera, uint8_t *data);
+  int zedSetAutoExp(bool autoexp);
+  int zedSetGain(uint16_t gain);
+  int zedSetExposure(uint16_t exposure);
 
   ros::NodeHandle nh_, priv_nh_;
 
@@ -67,12 +74,20 @@ private:
 
   image_transport::ImageTransport it_;
   image_transport::CameraPublisher cam_pub_;
+  image_transport::CameraPublisher cam_pub_right_;
 
   dynamic_reconfigure::Server<UVCCameraConfig> config_server_;
   UVCCameraConfig config_;
   bool config_changed_;
 
   camera_info_manager::CameraInfoManager cinfo_manager_;
+  camera_info_manager::CameraInfoManager cinfo_manager_right_;
+
+  bool is_zed_camera_;
+  bool is_stereo_;
+
+  sensor_msgs::Image image_;
+  sensor_msgs::Image image_right_;
 };
 
 };

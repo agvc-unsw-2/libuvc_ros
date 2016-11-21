@@ -38,7 +38,8 @@
 #include <std_msgs/Header.h>
 #include <image_transport/camera_publisher.h>
 #include <dynamic_reconfigure/server.h>
-#include <libuvc/libuvc.h>
+#include "/usr/local/include/libuvc/libuvc.h" //TODO fix this
+#include <yaml-cpp/yaml.h>
 
 namespace libuvc_camera {
 
@@ -49,8 +50,7 @@ CameraDriver::CameraDriver(ros::NodeHandle nh, ros::NodeHandle priv_nh)
     it_(nh_),
     config_server_(mutex_, priv_nh_),
     config_changed_(false),
-    cinfo_manager_(nh) {
-  cam_pub_ = it_.advertiseCamera("image_raw", 1, false);
+    cinfo_manager_(nh), cinfo_manager_right_(nh) {
 }
 
 CameraDriver::~CameraDriver() {
@@ -96,6 +96,135 @@ void CameraDriver::Stop() {
   state_ = kInitial;
 }
 
+void CameraDriver::setupCameraInfo(UVCCameraConfig &new_config)
+{
+	std::string left_url, right_url;
+
+	if (new_config.camera_match_url != "") {
+		ROS_INFO_STREAM("Opening file " << new_config.camera_match_url);
+		YAML::Node config = YAML::LoadFile(new_config.camera_match_url);
+		std::string hostname, serial;
+
+		std::stringstream ss;
+		ss << "hostname" << " 2>&1";
+		std::string cmd = ss.str();
+
+		int buffer_size = 256;
+		char buffer[buffer_size];
+		FILE *stream = popen(cmd.c_str(), "r");
+		if (stream) {
+			while (!feof(stream)) {
+				if (fgets(buffer, buffer_size, stream) != NULL) {
+					hostname.append(buffer);
+				}
+			}
+			pclose(stream);
+			// any output should be an error
+			if (hostname.length() > 0) {
+				// remove the new line
+				hostname.resize(hostname.size() - 1);
+				ROS_WARN("Got hostname: %s", hostname.c_str());
+			}
+		} else {
+			ROS_WARN("Could not get hostname");
+		}
+
+		if (config[hostname]) {
+			serial = config[hostname].as<std::string>();
+			ROS_INFO_STREAM("Using camera " << serial << " for machine " << hostname);
+			left_url =  new_config.camera_info_url + serial + ".yaml";
+			right_url = new_config.camera_info_url_right + serial + ".yaml";
+		} else {
+			ROS_ERROR_STREAM("Cannot find the serial number of the camera for this machine (" << hostname << ")");
+		}
+	} else {
+		left_url = new_config.camera_info_url;
+		right_url = new_config.camera_info_url_right;
+	}
+	
+	ROS_INFO_STREAM("Camera cal files are " << left_url << " and " << right_url);
+
+    cinfo_manager_.loadCameraInfo(left_url);
+	if (is_stereo_) {
+		cinfo_manager_right_.loadCameraInfo(right_url);
+
+		cinfo_manager_.setCameraName("left_camera");
+		cinfo_manager_right_.setCameraName("right_camera");
+	} else {
+		cinfo_manager_.setCameraName("camera");	
+	}
+}
+
+#define ZED_wINDEX_GENERIC 768
+#define ZED_wVALUE_GENERIC 0x200
+#define ZED_ITEM_AUTOEXP 0x22
+#define ZED_ITEM_GAIN 0x25
+#define ZED_ITEM_EXPOSURE 0x24
+#define ZED_LEFT 1
+#define ZED_RIGHT 2
+#define ZED_GENERIC_LENGTH 64
+#define ZED_EXPOSURE_MIN 0xc0
+#define ZED_EXPOSURE_MAX 0x1d40
+#define ZED_GAIN_MIN 0x99
+#define ZED_GAIN_MAX 0x7ff
+
+int CameraDriver::zedSetGeneric(uint8_t item, uint8_t camera, uint8_t *data)
+{
+	uint8_t buf[ZED_GENERIC_LENGTH];
+	buf[0] = 7;
+	buf[1] = item;
+	buf[2] = camera;
+	memcpy(&buf[3], data, ZED_GENERIC_LENGTH - 3);
+
+	return uvc_set_ctrl_generic(devh_, ZED_wVALUE_GENERIC, ZED_wINDEX_GENERIC,
+			buf, ZED_GENERIC_LENGTH);
+}
+
+int CameraDriver::zedSetAutoExp(bool autoexp)
+{
+	uint8_t data[ZED_GENERIC_LENGTH] = {0};
+	if (autoexp) {
+		return zedSetGeneric(ZED_ITEM_AUTOEXP, 1, data);
+	} else {
+		zedSetGeneric(ZED_ITEM_AUTOEXP, 0, data);
+		zedSetGeneric(0x26, 1, data);
+		zedSetGeneric(0x27, 1, data);
+		zedSetGeneric(0x26, 1, data);
+	}
+}
+
+int CameraDriver::zedSetGain(uint16_t gain)
+{
+	if (gain < ZED_GAIN_MIN) {
+		gain = ZED_GAIN_MIN;
+	} else if (gain > ZED_GAIN_MAX) {
+		gain = ZED_GAIN_MAX;
+	}
+
+	uint8_t data[ZED_GENERIC_LENGTH] = {0};
+	data[0] = gain >> 8;
+	data[1] = gain & 255;
+
+	zedSetGeneric(ZED_ITEM_GAIN, ZED_LEFT, data);
+	return zedSetGeneric(ZED_ITEM_GAIN, ZED_RIGHT, data);
+}
+
+int CameraDriver::zedSetExposure(uint16_t exposure)
+{
+	if (exposure < ZED_EXPOSURE_MIN) {
+		exposure = ZED_EXPOSURE_MIN;
+	} else if (exposure > ZED_EXPOSURE_MAX) {
+		exposure = ZED_EXPOSURE_MAX;
+	}
+
+	uint8_t data[ZED_GENERIC_LENGTH] = {0};
+	data[0] = exposure >> 8;
+	data[1] = exposure & 255;
+
+	zedSetGeneric(ZED_ITEM_EXPOSURE, ZED_LEFT, data);
+	return zedSetGeneric(ZED_ITEM_EXPOSURE, ZED_RIGHT, data);
+}
+
 void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t level) {
   boost::recursive_mutex::scoped_lock(mutex_);
 
@@ -108,43 +237,67 @@ void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t lev
     OpenCamera(new_config);
   }
 
-  if (new_config.camera_info_url != config_.camera_info_url)
-    cinfo_manager_.loadCameraInfo(new_config.camera_info_url);
+  if (new_config.camera_info_url != config_.camera_info_url ||
+		  new_config.camera_info_url_right != config_.camera_info_url_right ||
+		  new_config.camera_match_url != config_.camera_match_url) {
+	  setupCameraInfo(new_config);
+  }
 
   if (state_ == kRunning) {
 #define PARAM_INT(name, fn, value) if (new_config.name != config_.name) { \
       int val = (value);                                                \
       if (uvc_set_##fn(devh_, val)) {                                   \
         ROS_WARN("Unable to set " #name " to %d", val);                 \
-        new_config.name = config_.name;                                 \
       }                                                                 \
     }
 
-    PARAM_INT(scanning_mode, scanning_mode, new_config.scanning_mode);
-    PARAM_INT(auto_exposure, ae_mode, 1 << new_config.auto_exposure);
-    PARAM_INT(auto_exposure_priority, ae_priority, new_config.auto_exposure_priority);
-    PARAM_INT(exposure_absolute, exposure_abs, new_config.exposure_absolute * 10000);
-    PARAM_INT(auto_focus, focus_auto, new_config.auto_focus ? 1 : 0);
-    PARAM_INT(focus_absolute, focus_abs, new_config.focus_absolute);
-    PARAM_INT(gain, gain, new_config.gain);
-    PARAM_INT(iris_absolute, iris_abs, new_config.iris_absolute);
     PARAM_INT(brightness, brightness, new_config.brightness);
-    
+    PARAM_INT(contrast, contrast, new_config.contrast);
+    PARAM_INT(saturation, saturation, new_config.saturation);
+    PARAM_INT(hue, hue, new_config.hue);
 
-    if (new_config.pan_absolute != config_.pan_absolute || new_config.tilt_absolute != config_.tilt_absolute) {
+	if (is_zed_camera_) {
+		int r = 0;
+		if (r = new_config.gain != config_.gain) {
+			if (zedSetGain(new_config.gain)) {
+				ROS_WARN("Unable to set gain to %d, error %d", new_config.gain, r);
+			}
+		}
+		
+		if (new_config.exposure_absolute != config_.exposure_absolute) {
+			if (zedSetExposure(new_config.exposure_absolute * 1000)) {
+				ROS_WARN("Unable to set exposure to %lf, error %d", new_config.exposure_absolute, r);
+			}
+		}
+
+		if (new_config.auto_exposure != config_.auto_exposure) {
+			if (zedSetAutoExp(new_config.auto_exposure ? 1 : 0)) {
+				ROS_WARN("Unable to set auto_exposure to %d, error %d", new_config.auto_exposure, r);
+			}
+		}
+	} else {
+		PARAM_INT(auto_focus, focus_auto, new_config.auto_focus ? 1 : 0);
+		PARAM_INT(focus_absolute, focus_abs, new_config.focus_absolute);
+		PARAM_INT(iris_absolute, iris_abs, new_config.iris_absolute);
+		PARAM_INT(scanning_mode, scanning_mode, new_config.scanning_mode);
+		PARAM_INT(auto_exposure, ae_mode, 1 << new_config.auto_exposure);
+		PARAM_INT(gain, gain, new_config.gain);
+		PARAM_INT(exposure_absolute, exposure_abs, new_config.exposure_absolute * 10000);
+		PARAM_INT(auto_exposure_priority, ae_priority, new_config.auto_exposure_priority);
+	}
+
+    /*if (new_config.pan_absolute != config_.pan_absolute || new_config.tilt_absolute != config_.tilt_absolute) {
       if (uvc_set_pantilt_abs(devh_, new_config.pan_absolute, new_config.tilt_absolute)) {
         ROS_WARN("Unable to set pantilt to %d, %d", new_config.pan_absolute, new_config.tilt_absolute);
         new_config.pan_absolute = config_.pan_absolute;
         new_config.tilt_absolute = config_.tilt_absolute;
       }
-    }
+    }*/
     // TODO: roll_absolute
     // TODO: privacy
     // TODO: backlight_compensation
-    // TODO: contrast
     // TODO: power_line_frequency
     // TODO: auto_hue
-    // TODO: saturation
     // TODO: sharpness
     // TODO: gamma
     // TODO: auto_white_balance
@@ -164,59 +317,74 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   assert(state_ == kRunning);
   assert(rgb_frame_);
 
-  sensor_msgs::Image::Ptr image(new sensor_msgs::Image());
-  image->width = config_.width;
-  image->height = config_.height;
-  image->step = image->width * 3;
-  image->data.resize(image->step * image->height);
+  uvc_frame_t *output_frame = frame;
 
   if (frame->frame_format == UVC_FRAME_FORMAT_BGR){
-    image->encoding = "bgr8";
-    memcpy(&(image->data[0]), frame->data, frame->data_bytes);
+    image_.encoding = "bgr8";
   } else if (frame->frame_format == UVC_FRAME_FORMAT_RGB){
-    image->encoding = "rgb8";
-    memcpy(&(image->data[0]), frame->data, frame->data_bytes);
+    image_.encoding = "rgb8";
   } else if (frame->frame_format == UVC_FRAME_FORMAT_UYVY) {
-    image->encoding = "yuv422";
-    memcpy(&(image->data[0]), frame->data, frame->data_bytes);
+    image_.encoding = "yuv422";
   } else if (frame->frame_format == UVC_FRAME_FORMAT_YUYV) {
-    // FIXME: uvc_any2bgr does not work on "yuyv" format, so use uvc_yuyv2bgr directly.
     uvc_error_t conv_ret = uvc_yuyv2bgr(frame, rgb_frame_);
     if (conv_ret != UVC_SUCCESS) {
       uvc_perror(conv_ret, "Couldn't convert frame to RGB");
       return;
     }
-    image->encoding = "bgr8";
-    memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
+    image_.encoding = "bgr8";
+	output_frame = rgb_frame_;
   } else if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
     // FIXME: uvc_any2bgr does not work on "mjpeg" format, so use uvc_mjpeg2rgb directly.
-    uvc_error_t conv_ret = uvc_mjpeg2rgb(frame, rgb_frame_);
-    if (conv_ret != UVC_SUCCESS) {
-      uvc_perror(conv_ret, "Couldn't convert frame to RGB");
-      return;
-    }
-    image->encoding = "rgb8";
-    memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
+//    uvc_error_t conv_ret = uvc_mjpeg2rgb(frame, rgb_frame_);
+    //if (conv_ret != UVC_SUCCESS) {
+    //  uvc_perror(conv_ret, "Couldn't convert frame to RGB");
+    //  return;
+    //}
+    //image->encoding = "rgb8";
+    //memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
   } else {
     uvc_error_t conv_ret = uvc_any2bgr(frame, rgb_frame_);
     if (conv_ret != UVC_SUCCESS) {
       uvc_perror(conv_ret, "Couldn't convert frame to RGB");
       return;
     }
-    image->encoding = "bgr8";
-    memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
+    image_.encoding = "bgr8";
+	output_frame = rgb_frame_;
   }
 
+  if (!is_stereo_) {
+	  memcpy(&(image_.data[0]), output_frame->data, output_frame->data_bytes);
+  } else {
+	uint8_t *ip = (uint8_t *)output_frame->data;
+	for (int i = 0; i < image_.height; ++i) {
+		memcpy(&(image_.data[i * image_.step]), ip += image_.step, image_.step);
+		memcpy(&(image_right_.data[i * image_right_.step]), ip += image_right_.step, image_right_.step);
+	}
+
+	image_right_.encoding = image_.encoding;
+  }
 
   sensor_msgs::CameraInfo::Ptr cinfo(
     new sensor_msgs::CameraInfo(cinfo_manager_.getCameraInfo()));
 
-  image->header.frame_id = config_.frame_id;
-  image->header.stamp = timestamp;
+  image_.header.frame_id = config_.frame_id;
+  image_.header.stamp = timestamp;
   cinfo->header.frame_id = config_.frame_id;
   cinfo->header.stamp = timestamp;
 
-  cam_pub_.publish(image, cinfo);
+  cam_pub_.publish(image_, *cinfo);
+  
+  if (is_stereo_) {
+	  sensor_msgs::CameraInfo::Ptr cinfo_right(
+		new sensor_msgs::CameraInfo(cinfo_manager_right_.getCameraInfo()));
+
+	  image_right_.header.frame_id = config_.frame_id;
+	  image_right_.header.stamp = timestamp;
+	  cinfo_right->header.frame_id = config_.frame_id;
+	  cinfo_right->header.stamp = timestamp;
+	  
+	  cam_pub_right_.publish(image_right_, *cinfo_right);
+  }
 
   if (config_changed_) {
     config_server_.updateConfig(config_);
@@ -238,7 +406,7 @@ void CameraDriver::AutoControlsCallback(
   void *data, size_t data_len) {
   boost::recursive_mutex::scoped_lock(mutex_);
 
-  printf("Controls callback. class: %d, event: %d, selector: %d, attr: %d, data_len: %u\n",
+  printf("Controls callback. class: %d, event: %d, selector: %d, attr: %d, data_len: %lu\n",
          status_class, event, selector, status_attribute, data_len);
 
   if (status_attribute == UVC_STATUS_ATTRIBUTE_VALUE_CHANGE) {
@@ -380,6 +548,21 @@ void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
     return;
   }
 
+  if (vendor_id == 0x2b03 && product_id == 0xf580) {
+	  is_zed_camera_ = true;
+	  is_stereo_ = true;
+  } else {
+	  is_zed_camera_ = false;
+	  is_stereo_ = false;
+  }
+  
+  if (is_stereo_) {
+	cam_pub_ = it_.advertiseCamera("left/image_raw", 1, false);
+	cam_pub_right_ = it_.advertiseCamera("right/image_raw", 1, false);
+  } else {
+	cam_pub_ = it_.advertiseCamera("image_raw", 1, false);
+  }
+
   uvc_set_status_callback(devh_, &CameraDriver::AutoControlsCallbackAdapter, this);
 
   uvc_stream_ctrl_t ctrl;
@@ -397,6 +580,24 @@ void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
     uvc_print_diag(devh_, NULL);
     return;
   }
+  
+  // Setup image message sizes
+  if (is_stereo_) {
+	  image_.width = new_config.width / 2;
+	  image_.height = new_config.height;
+	  image_.step = image_.width * 3;
+	  image_.data.resize(image_.step * image_.height);
+	  image_right_.width = new_config.width / 2;
+	  image_right_.height = new_config.height;
+	  image_right_.step = image_.width * 3;
+	  image_right_.data.resize(image_.step * image_.height);
+  } else {
+	  image_.width = new_config.width;
+	  image_.height = new_config.height;
+	  image_.step = image_.width * 3;
+	  image_.data.resize(image_.step * image_.height);
+  }
+  ROS_INFO_STREAM("image width " << image_.width << " height " << image_.height << " step " << image_.step);
 
   uvc_error_t stream_err = uvc_start_streaming(devh_, &ctrl, &CameraDriver::ImageCallbackAdapter, this, 0);
 
@@ -411,6 +612,7 @@ void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
     uvc_free_frame(rgb_frame_);
 
   rgb_frame_ = uvc_allocate_frame(new_config.width * new_config.height * 3);
+  ROS_INFO("Allocated %d bytes for frame", new_config.width * new_config.height * 3);
   assert(rgb_frame_);
 
   state_ = kRunning;
