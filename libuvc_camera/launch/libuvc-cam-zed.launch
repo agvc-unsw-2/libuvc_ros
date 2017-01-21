@@ -24,8 +24,10 @@
 			<param name="hue" value="0" />
 			<param name="saturation" value="4" />
 			<param name="gain" value="900" /> <!-- set between ~500 and ~1000. Validity of values seems to depend on exposure -->
-			<param name="auto_exposure" value="0" />
+			<param name="auto_exposure" value="3" />
 			<param name="exposure_absolute" value="0.01" />
+
+			<param name="decimate_factor" value="2" />
 		</node>
 	</group>
 </launch>

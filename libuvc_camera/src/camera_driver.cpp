@@ -244,6 +244,8 @@ void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t lev
 	  setupCameraInfo(new_config);
   }
 
+  decimate_factor_ = new_config.decimate_factor;
+
   if (state_ == kRunning) {
 #define PARAM_INT(name, fn, value) if (new_config.name != config_.name) { \
       int val = (value);                                                \
@@ -312,6 +314,12 @@ void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t lev
 }
 
 void CameraDriver::ImageCallback(uvc_frame_t *frame) {
+  decimate_counter_++;
+  if (decimate_counter_ < decimate_factor_) {
+    return;
+  }
+  decimate_counter_ = 0;
+
   ros::Time timestamp = ros::Time(frame->capture_time.tv_sec, frame->capture_time.tv_usec);
 
   boost::recursive_mutex::scoped_lock(mutex_);
@@ -359,8 +367,9 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   } else {
 	uint8_t *ip = (uint8_t *)output_frame->data;
 	for (int i = 0; i < image_.height; ++i) {
-		memcpy(&(image_.data[i * image_.step]), ip += image_.step, image_.step);
-		memcpy(&(image_right_.data[i * image_right_.step]), ip += image_right_.step, image_right_.step);
+		// Swap the left and right frames because of reasons...
+		memcpy(&image_right_.data[i * image_right_.step], ip += image_right_.step, image_right_.step);
+		memcpy(&image_.data[i * image_.step], ip += image_.step, image_.step);
 	}
 
 	image_right_.encoding = image_.encoding;
@@ -375,17 +384,16 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   cinfo->header.stamp = timestamp;
 
   cam_pub_.publish(image_, *cinfo);
-  
   if (is_stereo_) {
-	  sensor_msgs::CameraInfo::Ptr cinfo_right(
-		new sensor_msgs::CameraInfo(cinfo_manager_right_.getCameraInfo()));
+	sensor_msgs::CameraInfo::Ptr cinfo_right(
+	  new sensor_msgs::CameraInfo(cinfo_manager_right_.getCameraInfo()));
 
-	  image_right_.header.frame_id = config_.frame_id;
-	  image_right_.header.stamp = timestamp;
-	  cinfo_right->header.frame_id = config_.frame_id;
-	  cinfo_right->header.stamp = timestamp;
-	  
-	  cam_pub_right_.publish(image_right_, *cinfo_right);
+	image_right_.header.frame_id = config_.frame_id;
+	image_right_.header.stamp = timestamp;
+	cinfo_right->header.frame_id = config_.frame_id;
+	cinfo_right->header.stamp = timestamp;
+	
+	cam_pub_right_.publish(image_right_, *cinfo_right);
   }
 
   if (config_changed_) {

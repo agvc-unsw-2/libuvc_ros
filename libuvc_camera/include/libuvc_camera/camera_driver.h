@@ -88,6 +88,9 @@ private:
 
   sensor_msgs::Image image_;
   sensor_msgs::Image image_right_;
+
+  int decimate_factor_;
+  int decimate_counter_;
 };
 
 };
