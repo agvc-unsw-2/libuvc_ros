@@ -43,3 +43,11 @@ install(TARGETS camera_node libuvc_camera_nodelet
 install(FILES libuvc_camera_nodelet.xml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
   )
+
+install(DIRECTORY launch/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+  FILES_MATCHING PATTERN "*.launch"
+)
+install(DIRECTORY params/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/params
+)

@@ -321,6 +321,9 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   decimate_counter_ = 0;
 
   ros::Time timestamp = ros::Time(frame->capture_time.tv_sec, frame->capture_time.tv_usec);
+  if (is_zed_camera_) {
+    timestamp = ros::Time::now();
+  }
 
   boost::recursive_mutex::scoped_lock(mutex_);
 
