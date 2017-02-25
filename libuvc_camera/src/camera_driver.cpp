@@ -168,6 +168,7 @@ void CameraDriver::setupCameraInfo(UVCCameraConfig &new_config)
 #define ZED_EXPOSURE_MAX 0x1d40
 #define ZED_GAIN_MIN 0x99
 #define ZED_GAIN_MAX 0x7ff
+#define ZED_LATENCY 0.040
 
 int CameraDriver::zedSetGeneric(uint8_t item, uint8_t camera, uint8_t *data)
 {
@@ -322,7 +323,7 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
 
   ros::Time timestamp = ros::Time(frame->capture_time.tv_sec, frame->capture_time.tv_usec);
   if (is_zed_camera_) {
-    timestamp = ros::Time::now();
+    timestamp = ros::Time::now() - ros::Duration(ZED_LATENCY);
   }
 
   boost::recursive_mutex::scoped_lock(mutex_);
